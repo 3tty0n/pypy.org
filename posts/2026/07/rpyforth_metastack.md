@@ -42,3 +42,8 @@ This raises a natural question: can a meta-tracing compiler eliminate the
 interpreter's concrete stack loads, stores, and stack-pointer updates while
 preserving the language-level semantics of the data stack? To answer this
 question, we propose RPyForth: an ANS Forth interpreter written in RPython.
+
+## Acknowledgements
+
+This project is a collaboration with Kota Hakamada, a master's student at [Tokyo
+Metropolitan University](https://www.tmu.ac.jp/english/index.html).
