@@ -126,10 +126,10 @@ In the default fragment layout, the integer data stack has three parts:
 
 1. the top two cells, stored in the cached fields `t0` and `t1`;
 2. the next few cells, stored in a small fixed-size array named cached frame (or
-   simply `frame`) ; and
+   simply `frame`); and
 3. all deeper cells, stored in a preallocated array named `spill`.
 
-The default frame has eight cells, so the cache frame can hold ten values in
+The default frame has eight cells, so the active cache can hold ten values in
 total: two scalar tops and eight frame slots. Anything deeper goes to `spill`.
 After pushing the values `0` through `13`, the layout looks like this. Depth
 zero is the top of the stack.
@@ -153,9 +153,23 @@ zero is the top of the stack.
                  bottom of stack
 ```
 
+The indexes in both arrays increase toward the top of their area. In the
+active cache, `frame[0]` is the deepest cached value, while the highest live
+frame index sits immediately below `t1`. Likewise, `spill[0]` is the deepest
+spilled value and `spill[spill_ptr - 1]` sits immediately below the cache. The
+lookup code uses these index calculations:
+
+```text
+frame_index = cache_depth - 1 - depth
+spill_index = spill_ptr - 1 - (depth - cache_depth)
+```
+
+The first formula applies to cached depths of two or greater; depths zero and
+one map to `t0` and `t1`.
+
 Two counters tie the areas together. `cache_depth` is the number of live cells
-in the cached frame, and `spill_ptr` is the number in `spill`. The logical depth
-is therefore
+in the active cache, including `t0` and `t1`, and `spill_ptr` is the number in
+`spill`. The logical depth is therefore
 
 ```text
 cache_depth + spill_ptr
@@ -180,7 +194,7 @@ without pulling the whole data stack into the optimizer's virtual state.
 
 ## Aligning a fragment at a word call
 
-Before RPyForth enters a colon-defined word, it trims the cached frame to its
+Before RPyForth enters a colon-defined word, it trims the active cache to its
 top two cells. `t0` and `t1` stay where they are, while any live frame cells are
 appended to `spill`.
 
@@ -188,15 +202,24 @@ appended to `spill`.
 before the call                         after normalization
 
 t0       = e  (top)                     t0       = e  (callee argument)
-t1       = d                            t1       = d  (callee argument)  <- cache_depth
-frame[0] = c
+t1       = d                            t1       = d  (callee argument)
+frame[2] = c
 frame[1] = b
-frame[2] = a        <- cache depth
+frame[0] = a
 
-                                        spill[0] = c
+                                        spill[2] = c
                                         spill[1] = b
-                                        spill[2] = a <- spill_ptr
+                                        spill[0] = a
+
+cache_depth = 5                         cache_depth = 2
+spill_ptr   = 0                         spill_ptr   = 3
 ```
+
+This ordering follows `push_fragment_on()` directly. If `ap` is the old
+`spill_ptr`, the loop copies `frame[i]` to `spill[ap + i]` for every live frame
+cell. It then advances `spill_ptr` and sets `cache_depth` to two. Thus the copy
+preserves index order: `frame[0]` becomes the deepest newly parked value, and
+the highest live frame index becomes the new `spill[spill_ptr - 1]`.
 
 The top two cells become the callee's initial window. They often hold its
 arguments, so common calls pass them across the boundary without a copy. The
@@ -303,6 +326,14 @@ operations. That is the trade-off: the JIT sees a small cache that it can track,
 while ordinary memory preserves the rest of the Forth stack.
 
 ## Preliminary evaluation
+
+We evaluate RPyForth against the dedicated Forth interpreter and JIT compilers:
+Gforth (fast) version 0.7.9, SwiftForth x64-Linux 4.1.8, and VFXForth 64 5.43.
+The latter two compilers are commercial grade. We only use them for this evaluation.
+
+We run the [shootout](https://dada.perl.it/shootout/) benchmark suite and
+measure the elapsed time of the four (RPyForth, GForth (fast), SwiftForth, and
+VFXForth) targets.
 
 ## Acknowledgements
 
