@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="680"
+     viewBox="0 0 760 680" role="img"
+     aria-labelledby="title desc">
+  <title id="title">Fragmented stack layout</title>
+  <desc id="desc">The top two stack cells are scalar fields, the next eight cells
+  are a small frame, and deeper values are stored in one shared spill array with
+  N cells. N is 16,384 in RPyForth. The scalar fields and frame form the active
+  cache, whose loads and stores can be optimized away by the tracing JIT
+  compiler.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172033; }
+      .heading { font-size: 28px; font-weight: 600; }
+      .label { font-size: 23px; font-weight: 600; }
+      .body { font-size: 21px; }
+      .small { font-size: 18px; fill: #475569; }
+      .cell { stroke: #334155; stroke-width: 2; }
+      .scalar { fill: #dbeafe; }
+      .frame { fill: #eff6ff; }
+      .spill { fill: #f1f5f9; }
+      .move { fill: none; stroke: #475569; stroke-width: 3; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <text x="380" y="42" text-anchor="middle" class="heading">Fragmented stack layout</text>
+
+  <text x="38" y="82" text-anchor="middle" class="small">logical</text>
+  <text x="38" y="103" text-anchor="middle" class="small">index</text>
+  <path d="M38 115 L38 626" class="move"/>
+
+  <rect x="70" y="135" width="250" height="58" rx="8" class="cell scalar"/>
+  <text x="95" y="172" class="label">t0</text>
+  <text x="285" y="172" text-anchor="end" class="body">13</text>
+
+  <rect x="70" y="202" width="250" height="58" rx="8" class="cell scalar"/>
+  <text x="95" y="239" class="label">t1</text>
+  <text x="285" y="239" text-anchor="end" class="body">12</text>
+
+  <rect x="70" y="278" width="250" height="205" rx="8" class="cell frame"/>
+  <text x="95" y="316" class="label">frame[7]</text>
+  <text x="285" y="316" text-anchor="end" class="body">11</text>
+  <line x1="88" y1="335" x2="302" y2="335" stroke="#94a3b8"/>
+  <text x="195" y="385" text-anchor="middle" class="body">⋮</text>
+  <line x1="88" y1="414" x2="302" y2="414" stroke="#94a3b8"/>
+  <text x="95" y="458" class="label">frame[0]</text>
+  <text x="285" y="458" text-anchor="end" class="body">4</text>
+
+  <rect x="70" y="501" width="250" height="125" rx="8" class="cell spill"/>
+  <text x="95" y="539" class="label">spill[N-1]</text>
+  <text x="195" y="573" text-anchor="middle" class="body">⋮</text>
+  <text x="95" y="611" class="label">spill[0]</text>
+
+  <path d="M347 135 h28 v348 h-28" fill="none" stroke="#2563eb" stroke-width="4"/>
+  <text x="400" y="291" class="label">active cache</text>
+  <text x="400" y="326" class="body">2 scalar cells + 8 frame cells</text>
+  <text x="400" y="358" class="body">10 cells</text>
+  <text x="400" y="390" class="small">loads and stores can be</text>
+  <text x="400" y="416" class="small">optimized away</text>
+
+  <path d="M347 501 h28 v125 h-28" fill="none" stroke="#64748b" stroke-width="4"/>
+  <text x="400" y="545" class="label">shared spill</text>
+  <text x="400" y="578" class="body">N cells</text>
+  <text x="400" y="608" class="small">N = 16,384 in RPyForth</text>
+</svg>

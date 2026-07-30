@@ -16,28 +16,38 @@ implementation detail. Once a compiler understands the data dependencies, it
 can replace stack operations with single static assignment (SSA) values or
 registers. The operand stack then disappears from the optimized machine code.
 
-Forth treats its stack differently. In stack-oriented languages such as
-[Forth](https://www.forth.com/forth/),
-[PostScript](https://www.adobe.com/products/postscript.html), and
-[Factor](https://factorcode.org), the _data stack_ is part of the programming
-model. Words take values from it and leave results for the next word. There are
-no named parameters or return values at these boundaries.
+[Forth](https://www.forth.com/forth/) treats its stack differently. In Forth
+and other stack-oriented languages, the _data stack_ is part of the programming
+model. A word consumes values from it and leaves results for the next word.
+There are no named parameters or return values at these boundaries. The
+position of a value on the stack carries the data flow.
 
-A typical interpreter stores this stack in a mutable memory region and keeps a
-pointer to its top. Each word updates the pointer and reads or writes stack
-slots. These operations are harder to remove than the temporary stack access
-in a bytecode VM because the stack remains live between words, and a word's
-stack effect is implicit in its behavior rather than declared in a function
-signature.
+A straightforward interpreter stores this stack in a mutable memory region and
+keeps a pointer to its top. Each word updates the pointer and reads or writes
+stack slots. These operations are harder to remove than temporary stack access
+in a bytecode VM because the data stack remains live between words, and a
+word's stack effect is implicit in its behavior rather than declared in a
+function signature.
 
-RPyForth asks whether a meta-tracing JIT can remove those loads, stores, and
-pointer updates without changing the data stack that Forth programs see. It is
-an ANS Forth interpreter written in RPython.
+Why revisit Forth now? Interpreter performance is not a settled problem.
+[Recent work by Ertl and Paysan](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECOOP.2024.14)
+shows that VM instruction-pointer updates, which had little performance effect
+on older hardware, can become a critical dependency chain on recent
+out-of-order processors. Old implementation trade-offs can look different on
+current hardware. RPyForth examines another interpreter cost, the data stack:
+if a meta-tracing JIT compiler observes the program as it runs, how much of the
+stack machinery can it remove across word calls?
 
-## Stack-oriented languages and Forth
+We built RPyForth to test that question. It is an ANS Forth interpreter written
+in RPython, from which the PyPy toolchain generates a meta-tracing JIT compiler.
+The aim is to expose the otherwise implicit data flow between words to the
+compiler while preserving the data stack seen by Forth programs.
 
-The easiest way to see the difference is with a small example. In Python, we
-might square a value and then add one like this:
+## Background: Forth's data stack
+
+To see why this is difficult for a compiler, consider how Forth expresses the
+same data flow as a language with named arguments and return values. In Python,
+we might square a value and then add one like this:
 
 ```python
 def square(x):
@@ -49,30 +59,20 @@ def add_one(x):
 result = add_one(square(5))
 ```
 
-The Forth version is:
-
-```forth
-: square   dup * ;
-: add-one  1 + ;
-: compute  square add-one ;
-
-5 compute
-```
-
-A colon definition introduces a word. Here, `square` duplicates the top stack
-value and multiplies the two copies. Then `add-one` pushes `1` and adds it.
-
-Forth programmers usually document words with
-[*stack-effect comments*](https://www.complang.tuwien.ac.at/forth/gforth/Docs-html/Stack_002dEffect-Comments-Tutorial.html):
+The Forth version uses the data stack to pass the intermediate value:
 
 ```forth
 : square   ( n -- n^2 ) dup * ;
 : add-one  ( n -- n+1 ) 1 + ;
 : compute  ( n -- n^2+1 ) square add-one ;
+
+5 compute
 ```
 
-The values to the left of `--` are consumed, and the values to the right remain
-after the word finishes. These annotations are ordinary Forth comments.
+The colon introduces a word. `square` duplicates the top value and multiplies
+the two copies; `add-one` pushes `1` and adds it. The text in parentheses is a
+[*stack-effect comment*](https://www.complang.tuwien.ac.at/forth/gforth/Docs-html/Stack_002dEffect-Comments-Tutorial.html):
+values on the left of `--` are consumed, and values on the right remain.
 
 Here is the stack while `5 compute` runs. The rightmost value is on top:
 
@@ -88,273 +88,71 @@ Here is the stack while `5 compute` runs. The rightmost value is on top:
 ```
 
 `square` does not return `25` in the usual sense. It leaves `25` on the shared
-data stack, where `add-one` finds it.
-
-The composition
-
-```forth
-square add-one
-```
-
-still describes the same data flow as
-
-```text
-add_one(square(x))
-```
-
-but the intermediate value has no name. Its location on the stack carries the
-data flow.
-
-A straightforward Forth interpreter turns the example into a series of array
-accesses and stack-pointer updates. The awkward part for an optimizer is the
-word boundary: `square` writes a real stack slot, and `add-one` reads that slot
-later. The stack cannot simply disappear as a temporary bytecode stack often
-does.
+data stack, where `add-one` finds it. In a straightforward interpreter,
+`square` writes an array slot and `add-one` reads it back. RPyForth tries to
+make that intermediate value visible to the meta-tracing JIT compiler instead.
 
 ## RPyForth and the stack-fragmented layout
 
-We built RPyForth to test whether meta-tracing can remove this stack access.
-Its inner interpreter uses indirect threaded code. A colon definition is a
-sequence of word references, and the interpreter dispatches them one at a time.
-The PyPy toolchain generates a tracing JIT from that interpreter.
+RPyForth's interpreter uses indirect threaded code: a colon definition is
+a sequence of word references dispatched one at a time. The PyPy toolchain
+builds a tracing JIT compiler from this interpreter.
 
-RPyForth also has a _stack-fragmented layout_ that lines up the hot part of the
-data stack with word calls. We call the full three-area representation a
-_metastack_.
+To expose values across those dispatches, RPyForth keeps a small part of the
+data stack in a _stack-fragmented layout_ that the tracing JIT compiler can
+track. We call the complete three-area representation a _metastack_.
 
-## The three-area metastack
+## One stack, three storage areas
 
-In the default fragment layout, the integer data stack has three parts:
+The metastack is easiest to think of as a small working area in front of a
+larger backing store. The top two cells live in scalar fields named `t0` and
+`t1`. The next eight cells live in a small array called `frame`. Deeper values
+go into `spill`, one preallocated array shared by the VM.
 
-1. the top two cells, stored in the cached fields `t0` and `t1`;
-2. the next few cells, stored in a small fixed-size array named cached frame (or
-   simply `frame`); and
-3. all deeper cells, stored in a preallocated shared array named `spill`.
+![Fragmented stack layout](/images/2026-08-rpyforth-metastack-layout.svg){: width="580" }
 
-The default frame has eight cells, so the active cache can hold ten values in
-total: two scalar tops and eight frame slots. Anything deeper goes to `spill`.
+To a Forth program, these areas are still one stack. Ordinary stack operations
+route each depth to the right area. A push moves the old `t1` into `frame`,
+moves `t0` to `t1`, and puts the new value in `t0`. Pop follows the same path
+backwards. Values cross into `spill` only when the small cache fills or empties.
 
-After pushing the values `0` through `13`, the layout looks like this. Depth
-zero is the top of the stack.
+The two scalar fields and the default eight-cell frame give the active cache
+ten cells in total. The shared `spill` array has 16,384 cells.
+`RPYFORTH_FRAME_SIZE` can set the frame to between one and 64 cells; a normal
+build uses eight. The older `FRAGMENT_SIZE = 256` constant in
+`rpyforth/metastack.py` is not used by this stack path.
 
-<div class="math">
-$$
-\begin{array}{r@{\qquad}l@{\;}l}
-\text{depth} & \textit{top of stack} \\[0.6ex]
-\begin{array}{r} 0 \\ 1 \end{array} &
-\left.\begin{array}{@{}l@{}}
-  \rlap{t_0 = 13}\hphantom{\mathit{frame}[7] = 11} \\
-  \rlap{t_1 = 12}\hphantom{\mathit{frame}[7] = 11}
-\end{array}\right\} & \text{cached fields} \\[3.2ex]
-\begin{array}{r} 2 \\ \vdots \\ 9 \end{array} &
-\left.\begin{array}{@{}l@{}}
-  \mathit{frame}[7] = 11 \\
-  \vdots \\
-  \mathit{frame}[0] = \phantom{0}4
-\end{array}\right\} & \text{cached frame} \\[4.5ex]
-\begin{array}{r} 10 \\ \vdots \\ 13 \end{array} &
-\left.\begin{array}{@{}l@{}}
-  \rlap{\mathit{spill}[3] = \phantom{0}3}\hphantom{\mathit{frame}[7] = 11} \\
-  \vdots \\
-  \rlap{\mathit{spill}[0] = \phantom{0}0}\hphantom{\mathit{frame}[7] = 11}
-\end{array}\right\} & \text{shared spill} \\[3.2ex]
- & \textit{bottom of stack}
-\end{array}
-$$
-</div>
+## What happens at a word call
 
-The indexes in both arrays increase toward the top of their area. In the
-active cache, `frame[0]` is the deepest cached value, while the highest live
-frame index sits immediately below `t1`. Likewise, `spill[0]` is the deepest
-spilled value and `spill[spill_ptr - 1]` sits immediately below the cache. The
-lookup code uses these index calculations:
+A colon-defined word starts with a clean two-cell window. Just before the call,
+RPyForth keeps `t0` and `t1` in place and moves any live `frame` cells to
+`spill`. The top two values are often the callee's arguments, so the common
+case crosses the word boundary without copying them.
 
-<div class="math">
-$$
-\begin{aligned}
-\mathit{frame\_index} &= \mathit{cache\_depth} - 1 - \mathit{depth} \\
-\mathit{spill\_index} &= \mathit{spill\_ptr} - 1 - (\mathit{depth} - \mathit{cache\_depth})
-\end{aligned}
-$$
-</div>
+![Aligning the stack fragment at a Forth word call](/images/2026-08-rpyforth-word-call.svg)
 
-The first formula applies to cached depths of two or greater; depths zero and
-one map to `t0` and `t1`.
+The move does not split the data stack. A callee can still reach a third or
+deeper argument through ordinary stack operations. It can also reuse the now
+empty `frame` for temporary values.
 
-Two counters tie the areas together. `cache_depth` is the number of live cells
-in the active cache, including `t0` and `t1`, and `spill_ptr` is the number in
-`spill`. The logical depth is therefore
-
-<div class="math">
-$$
-\mathit{depth}_{\text{logical}} = \mathit{cache\_depth} + \mathit{spill\_ptr}
-$$
-</div>
-
-To a Forth program, this is still one stack. `peek(depth)` and
-`poke(depth, value)` work out which area contains the requested value. Depths
-zero and one map straight to `t0` and `t1`, which covers most arithmetic and
-basic stack words.
-
-### Push and pop
-
-An ordinary push moves the two tops and touches at most one frame slot.
-When needed, the old `t1` goes into the frame, `t0` moves to `t1`, and the new
-value becomes `t0`. Pop runs the same steps in reverse. If the cached frame is
-full, RPyForth first moves its deepest cell to `spill`. If the cache is empty,
-pop reads the top of `spill` instead.
-
-The cache is small on purpose. A larger frame would catch more stack values, but
-it would also give the JIT more slots to track. `spill` handles deep stacks
-without pulling the whole data stack into the optimizer's virtual state.
-
-## Aligning a fragment at a word call
-
-Before RPyForth enters a colon-defined word, it trims the active cache to its
-top two cells. `t0` and `t1` stay where they are, while any live frame cells are
-appended to `spill`.
-
-<div class="math">
-$$
-\begin{array}{c@{\qquad}c@{\qquad}c}
-\text{before the call} & & \text{after normalization} \\[1.4ex]
-\begin{array}{@{}l@{\;}l@{}}
-  t_0 &= e \quad (\text{top}) \\
-  t_1 &= d \\
-  \mathit{frame}[2] &= c \\
-  \mathit{frame}[1] &= b \\
-  \mathit{frame}[0] &= a \\[0.8ex]
-  \hline \\[-1.8ex]
-  \mathit{cache\_depth} &= 5 \\
-  \mathit{spill\_ptr} &= 0
-\end{array}
-& \Longrightarrow &
-\begin{array}{@{}l@{\;}l@{}}
-  t_0 &= e \quad (\text{callee argument}) \\
-  t_1 &= d \quad (\text{callee argument}) \\
-  \mathit{spill}[2] &= c \\
-  \mathit{spill}[1] &= b \\
-  \mathit{spill}[0] &= a \\[0.8ex]
-  \hline \\[-1.8ex]
-  \mathit{cache\_depth} &= 2 \\
-  \mathit{spill\_ptr} &= 3
-\end{array}
-\end{array}
-$$
-</div>
-
-This ordering follows `push_fragment_on()` directly. If `ap` is the old
-`spill_ptr`, the loop copies `frame[i]` to `spill[ap + i]` for every live frame
-cell. It then advances `spill_ptr` and sets `cache_depth` to two. Thus the copy
-preserves index order: `frame[0]` becomes the deepest newly parked value, and
-the highest live frame index becomes the new `spill[spill_ptr - 1]`.
-
-The top two cells become the callee's initial window. They often hold its
-arguments, so common calls pass them across the boundary without a copy. The
-rest of the caller's cached state waits below them in `spill`. This is not an
-access barrier: a callee that needs a third argument can still read it through
-the normal stack operations.
-
-Return is simple. The callee has already left its results on the
-same logical stack, with the saved caller values immediately below them, so
-there is nothing to copy back.
-
-Despite the name, a fragment is not a heap object allocated for each call. It
-is an implicit window over the cached frame and the used prefix of one shared,
-preallocated spill array. Recursive calls do not build a linked list of
-fragment objects.
-
-### Walking through a real call
-
-An example makes the alignment easier to follow. `SUMSQ` computes the sum of two
-squares while another value remains below its arguments:
-
-```forth
-: SQR    DUP * ;
-: SUMSQ  SQR SWAP SQR + ;
-
-9 3 4 SUMSQ + .   \ prints 34
-```
-
-Just before the call, the cached frame holds all three values:
-
-<div class="math">
-$$
-t_0 = 4,\quad t_1 = 3,\quad \mathit{frame}[0] = 9,\quad
-\mathit{cache\_depth} = 3,\quad \mathit{spill\_ptr} = 0
-$$
-</div>
-
-On entry, `SUMSQ` keeps `4` and `3` in the scalar tops. The unrelated `9` moves
-to `spill[0]`:
-
-<div class="math">
-$$
-t_0 = 4,\quad t_1 = 3,\quad \mathit{frame} = \varnothing,\quad
-\mathit{spill}[0] = 9,\quad
-\mathit{cache\_depth} = 2,\quad \mathit{spill\_ptr} = 1
-$$
-</div>
-
-The table records the important word boundaries. A dash marks an unused logical
-slot. Physical slots may still contain old bits, but values outside
-`cache_depth` are not part of the stack.
-
-| event | `t0` | `t1` | `frame` | `spill` | `cache_depth` | `spill_ptr` |
-|---|---:|---:|---:|---:|---:|---:|
-| push `9 3 4`             |  4 |  3 | 9 | - | 3 | 0 |
-| enter `SUMSQ`            |  4 |  3 | - | 9 | 2 | 1 |
-| return from first `SQR`  | 16 |  3 | - | 9 | 2 | 1 |
-| `SWAP`                   |  3 | 16 | - | 9 | 2 | 1 |
-| return from second `SQR` |  9 | 16 | - | 9 | 2 | 1 |
-| `SUMSQ`'s `+`            | 25 |  - | - | 9 | 1 | 1 |
-| return from `SUMSQ`      | 25 |  - | - | 9 | 1 | 1 |
-| caller's `+`             | 34 |  - | - | - | 1 | 0 |
-
-Neither call to `SQR` parks anything because `cache_depth` is already two.
-Inside `SQR`, `DUP` briefly reuses `frame[0]`, then `*` brings the cache back to
-two cells. `SUMSQ` eventually leaves `25` in `t0` and returns without moving
-`9`. The caller's final `+` is the first operation that reaches below the cache.
-It pops `9` from `spill` and produces `34`.
-
-### Does RPyForth reuse fragments?
-
-Yes, but it reuses storage, not fragment objects. There is no allocation per
-call, no free list, and no object pool.
-
-The fixed-size `frame` is scratch space for the cached frame. As soon as its
-contents move to `spill`, the callee may overwrite those slots. The first `DUP`
-in the example writes to the newly vacant `frame[0]`.
-
-The spill array is reusable too, but a live stack value keeps its slot. Popping
-a spilled value decrements `spill_ptr`. `THROW` restores the value captured by
-`CATCH`, and a stack reset sets it to zero. The next park may overwrite any
-cells above the current pointer.
-
-In the example, `spill[0]` remains occupied while `9` is live. The caller's
-final `+` consumes it and changes `spill_ptr` from one to zero. The next saved
-value can then use the same slot.
-
-One detail matters here: return does not move `spill_ptr` backwards. A Forth
-word may consume values below its initial window, or it may leave a different
-number of results. Spill slots therefore follow the lifetime of values on the
-data stack, not the lifetime of a call.
+There is no matching restore step on return. Forth words consume their inputs
+and leave their results on the same logical stack, so the caller simply
+continues from that state. A fragment is a window over reusable storage, not a
+heap object. Calls and recursive calls do not allocate fragment objects or
+build a linked list. A spill slot remains in use while its value is live and
+can be reused after that value is popped.
 
 ## What the meta-tracing JIT compiler gets from this layout
 
-In the stack-fragmented build, the interpreter object is a PyPy
-_virtualizable_. Its scalar tops, `cache_depth`, `spill_ptr`, and the small
-frame are part of the virtualizable state. The large spill array is not.
+RPyForth marks the scalar fields, the small frame, and their counters so the
+tracing JIT compiler can treat them as part of the trace state. During tracing,
+the compiler can carry these stack values through inlined Forth words instead
+of repeatedly loading and storing them. If a hot loop's working stack fits in
+the active cache, much of its stack traffic can become register operations.
 
-While tracing, the JIT treats `t0` and `t1` as ordinary values. It can carry them
-through inlined Forth words and remove the interpreter's field loads and stores.
-It can also track the small frame one slot at a time. If a hot loop's working
-stack fits in the cached frame, its stack access can compile down to register
-operations even though the Forth program still sees a shared data stack.
-
-Deep or irregular accesses still reach `spill` and remain real memory
-operations. That is the trade-off: the JIT sees a small cache that it can track,
-while ordinary memory preserves the rest of the Forth stack.
+The large `spill` array stays in memory. Deep or irregular stack access still
+uses it, but the tracing JIT compiler does not have to track the whole data
+stack. This is why the active cache is deliberately small.
 
 ## Preliminary evaluation
 
@@ -391,9 +189,10 @@ and the
 [SwiftForth optimizing compiler](https://www.forth.com/swiftforth/)
 generate optimized native code as a definition is compiled. They use inlining
 and other compile-time rules, but no execution profile. The code is ready
-before the word first runs, so there is no JIT warm-up.
+before the word first runs, so execution does not trigger compilation or
+warm-up.
 
-On the other hard, RPyForth performs meta-tracing compilation:
+On the other hand, RPyForth performs meta-tracing compilation:
 recording an executed path, compiling a  specialized trace, and adding guards
 for the assumptions in that trace. It means that compilation
 costs time, and a failed guard may lead back to the interpreter or to a bridge.
@@ -421,16 +220,16 @@ we have not optimized well. The effect is largest in `hash2`, which is 5.4x
 slower than `gforth-fast`: it calls 200 different words through one highly
 polymorphic `EXECUTE` site, while a trace specializes to the execution tokens
 it observes. Its timing and warm-up curve are consistent with repeated guard
-failures and bridge activity, although we still need the JIT log to count
-them. The effect is smaller in `wordfreq`, at 1.8x slower, where each word is
-copied from Forth's byte-addressed memory into an allocated RPython string
-before lookup. Keeping similar parsing and formatting paths on the byte buffer
-already produced large gains in `sumcol`, `hash`, and `moments`, so this
-boundary is the next likely target, though `wordfreq` also includes dictionary
-and file operations. Finally, `reversefile` and `spellcheck` finish in
-single-digit microseconds, too quickly to amortize fixed runtime costs;
-`reversefile` does not produce a JIT trace at all, so these two results say
-little about compiled-code quality.
+failures and bridge activity, although we still need logs from the meta-tracing
+JIT compiler to count them. The effect is smaller in `wordfreq`, at 1.8x
+slower, where each word is copied from Forth's byte-addressed memory into an
+allocated RPython string before lookup. Keeping similar parsing and formatting
+paths on the byte buffer already produced large gains in `sumcol`, `hash`, and
+`moments`, so this boundary is the next likely target, though `wordfreq` also
+includes dictionary and file operations. Finally, `reversefile` and
+`spellcheck` finish in single-digit microseconds, too quickly to amortize fixed
+runtime costs; `reversefile` does not produce a compiled trace at all, so these
+two results say little about compiled-code quality.
 
 ### Result: Warm-up depends on the trace
 
@@ -458,11 +257,12 @@ layout from the rest of RPyForth.
 
 ## Conclusion and future work
 
-RPyForth began with a simple question: can a meta-tracing JIT optimize Forth's
-data stack across word calls? The metastack is our answer. It keeps the active
-part of the stack in two scalar fields and a small frame that the JIT can
-track, while a shared spill array handles deeper values. Forth programs still
-see one data stack, and word calls do not allocate fragment objects.
+RPyForth began with a simple question: can a meta-tracing JIT compiler optimize
+Forth's data stack across word calls? The metastack is our answer. It keeps the
+active part of the stack in two scalar fields and a small frame that the
+compiler can track, while a shared spill array handles deeper values. Forth
+programs still see one data stack, and word calls do not allocate fragment
+objects.
 
 The preliminary results are encouraging. RPyForth is faster on average than
 the three systems in the shootout. However, these comparisons do
@@ -471,14 +271,14 @@ To measure that effect, we plan to compare RPyForth with and without the
 fragmented layout and inspect the optimized traces for stack loads and stores.
 
 There are also clear places to improve. In `hash2`, 200 different words pass
-through the same polymorphic `EXECUTE` site. We need to inspect the JIT logs to
-see how much time is lost to guard failures and bridges. `wordfreq` has a
-different problem: it copies words from Forth's byte-addressed memory into
-RPython strings before lookup. Keeping that path on the byte buffer should
-remove those allocations.
+through the same polymorphic `EXECUTE` site. We need to inspect logs from the
+meta-tracing JIT compiler to see how much time is lost to guard failures and
+bridges. `wordfreq` has a different problem: it copies words from Forth's
+byte-addressed memory into RPython strings before lookup. Keeping that path on
+the byte buffer should remove those allocations.
 
 After improving these paths, we plan to evaluate RPyForth with larger programs,
-including the [Forth appbench suite](https://www.complang.tuwien.ac.at/forth/appbench-1.4.zip).
+including the [Forth appbench suite (zip)](https://www.complang.tuwien.ac.at/forth/appbench-1.4.zip).
 Ertl and Paysan used appbench in their
 [ECOOP 2024 paper](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECOOP.2024.14)
 because it contains substantial programs that are closer to idiomatic Forth
@@ -491,4 +291,3 @@ programs.
 
 This project is a collaboration with Kota Hakamada, a master's student at [Tokyo
 Metropolitan University](https://www.tmu.ac.jp/english/index.html).
-
