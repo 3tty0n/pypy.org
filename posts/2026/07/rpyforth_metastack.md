@@ -1,7 +1,7 @@
 <!--
 .. title: RPyForth: An ANS Forth Interpreter written in RPython
 .. slug: benchmarker2-for-pypy
-.. date: 2026-07-16 17:01:09 UTC
+.. date: 2026-07-31 09:00:00 UTC
 .. tags:
 .. category:
 .. link:
