@@ -119,8 +119,7 @@ backwards. Values cross into `spill` only when the small cache fills or empties.
 The two scalar fields and the default eight-cell frame give the active cache
 ten cells in total. The shared `spill` array has 16,384 cells.
 `RPYFORTH_FRAME_SIZE` can set the frame to between one and 64 cells; a normal
-build uses eight. The older `FRAGMENT_SIZE = 256` constant in
-`rpyforth/metastack.py` is not used by this stack path.
+build uses eight.
 
 ## What happens at a word call
 
