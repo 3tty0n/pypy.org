@@ -213,22 +213,16 @@ that RPyForth is faster. In our setup, RPyForth is faster than the three targets
 1.42x faster than VFX Forth, 1.62x faster than `gforth-fast`, and 2.74x faster than
 SwiftForth.
 
-The slower results show the current boundary of RPyForth's optimization: work
-that cannot stay as simple operations in a stable trace still falls onto paths
-we have not optimized well. The effect is largest in `hash2`, which is 5.4x
-slower than `gforth-fast`: it calls 200 different words through one highly
-polymorphic `EXECUTE` site, while a trace specializes to the execution tokens
-it observes. Its timing and warm-up curve are consistent with repeated guard
-failures and bridge activity, although we still need logs from the meta-tracing
-JIT compiler to count them. The effect is smaller in `wordfreq`, at 1.8x
-slower, where each word is copied from Forth's byte-addressed memory into an
-allocated RPython string before lookup. Keeping similar parsing and formatting
-paths on the byte buffer already produced large gains in `sumcol`, `hash`, and
-`moments`, so this boundary is the next likely target, though `wordfreq` also
-includes dictionary and file operations. Finally, `reversefile` and
-`spellcheck` finish in single-digit microseconds, too quickly to amortize fixed
-runtime costs; `reversefile` does not produce a compiled trace at all, so these
-two results say little about compiled-code quality.
+RPyForth performs best when a benchmark repeatedly follows a small and stable
+execution path. The slower cases depart from that pattern in different ways.
+`hash2`, which is 5.4x slower than `gforth-fast`, calls 200 different words
+through the same `EXECUTE` site. The meta-tracing JIT compiler therefore sees
+many possible call targets at one point, which makes specialization less
+effective. `wordfreq` is 1.8x slower because it converts each word out of
+Forth's byte buffer before the dictionary lookup, so part of the work leaves
+the optimized path. `reversefile` and `spellcheck` have a simpler problem: they
+finish in only a few microseconds, leaving little work for the compiler to
+optimize. `reversefile` does not produce a compiled trace at all.
 
 ### Result: Warm-up depends on the trace
 
