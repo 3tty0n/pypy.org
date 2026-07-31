@@ -319,3 +319,5 @@ programs.
 
 This project is a collaboration with Kota Hakamada, a master's student at [Tokyo
 Metropolitan University](https://www.tmu.ac.jp/english/index.html).
+I would also like to acknowledge the advice from CF Bolz-Tereick that helped
+me realize the fragmented stack layout.
